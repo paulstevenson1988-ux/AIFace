@@ -310,4 +310,4 @@ setInterval(() => {
     sendUART(data);
    
   }
-}, 100); // every 100ms = 10 times per second
+}, 33); // every 33ms = 30 times per second
