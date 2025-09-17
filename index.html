@@ -2,13 +2,13 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>MediaPipe Face Tracking → ESP32 BLE</title>
+<title>Face Tracking → ESP32 BLE</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
   body { font-family: sans-serif; margin: 0; background: #111; color: #eee; }
   #output { position: absolute; top: 0; left: 0; }
-  #log { white-space: pre; background: #222; padding: 8px; height: 150px; overflow: auto; }
-  button { margin: 8px; padding: 8px 12px; }
+  #log { white-space: pre-wrap; background: #222; padding: 8px; height: 150px; overflow: auto; }
+  button { margin: 8px; padding: 8px 12px; font-size: 16px; }
 </style>
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
@@ -19,18 +19,16 @@
 <video id="input_video" style="display:none;"></video>
 <canvas id="output" width="640" height="480"></canvas>
 <div>
-  <button id="connect">Connect BLE</button>
-  <button id="disconnect" disabled>Disconnect</button>
+  <button id="connectBtn">Connect & Start Tracking</button>
 </div>
 <div id="log"></div>
 
 <script>
-const SERVICE_UUID = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
-const RX_UUID = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';
-const TX_UUID = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';
+const NUS_SERVICE_UUID = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+const NUS_RX_UUID      = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';
+const NUS_TX_UUID      = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';
 
-let device, server, service, rxChar, txChar;
-let connected = false;
+let rxChar, txChar, connected = false;
 
 function log(msg) {
   const logEl = document.getElementById('log');
@@ -39,42 +37,42 @@ function log(msg) {
   console.log(msg);
 }
 
+function zeroPad(num, len) {
+  return String(Math.max(0, Math.min(num, (10**len)-1))).padStart(len, '0');
+}
+
 async function connectBLE() {
   try {
-    device = await navigator.bluetooth.requestDevice({
-      filters: [{ services: [SERVICE_UUID] }],
-      optionalServices: [SERVICE_UUID]
-    });
-    server = await device.gatt.connect();
-    service = await server.getPrimaryService(SERVICE_UUID);
-    rxChar = await service.getCharacteristic(RX_UUID);
-    txChar = await service.getCharacteristic(TX_UUID);
+    let device;
+    try {
+      device = await navigator.bluetooth.requestDevice({
+        filters: [{ services: [NUS_SERVICE_UUID] }],
+        optionalServices: [NUS_SERVICE_UUID]
+      });
+    } catch {
+      log('UUID filter found nothing, falling back to acceptAllDevices...');
+      device = await navigator.bluetooth.requestDevice({
+        acceptAllDevices: true,
+        optionalServices: [NUS_SERVICE_UUID]
+      });
+    }
+
+    const server = await device.gatt.connect();
+    const service = await server.getPrimaryService(NUS_SERVICE_UUID);
+
+    txChar = await service.getCharacteristic(NUS_TX_UUID);
     await txChar.startNotifications();
     txChar.addEventListener('characteristicvaluechanged', e => {
-      log('TX: ' + new TextDecoder().decode(e.target.value));
+      const value = new TextDecoder().decode(e.target.value);
+      log('TX notify: ' + value);
     });
+
+    rxChar = await service.getCharacteristic(NUS_RX_UUID);
     connected = true;
-    document.getElementById('connect').disabled = true;
-    document.getElementById('disconnect').disabled = false;
     log('Connected to ' + device.name);
   } catch (err) {
     log('BLE error: ' + err);
   }
-}
-
-function disconnectBLE() {
-  if (device && device.gatt.connected) device.gatt.disconnect();
-  connected = false;
-  document.getElementById('connect').disabled = false;
-  document.getElementById('disconnect').disabled = true;
-  log('Disconnected');
-}
-
-document.getElementById('connect').onclick = connectBLE;
-document.getElementById('disconnect').onclick = disconnectBLE;
-
-function zeroPad(num, len) {
-  return String(num).padStart(len, '0');
 }
 
 async function sendFrame(params) {
@@ -92,8 +90,12 @@ async function sendFrame(params) {
     String(params.Smile) +
     String(params.Visible);
   if (frame.length === 19) {
-    await rxChar.writeValueWithoutResponse(new TextEncoder().encode(frame));
-    log('Sent: ' + frame);
+    try {
+      await rxChar.writeValueWithoutResponse(new TextEncoder().encode(frame));
+      log('Sent: ' + frame);
+    } catch (e) {
+      log('Send error: ' + e);
+    }
   }
 }
 
@@ -106,26 +108,28 @@ function onResults(results) {
   ctx.save();
   ctx.clearRect(0, 0, canvasEl.width, canvasEl.height);
   ctx.drawImage(results.image, 0, 0, canvasEl.width, canvasEl.height);
+
   if (results.multiFaceLandmarks && results.multiFaceLandmarks.length > 0) {
-    for (const landmarks of results.multiFaceLandmarks) {
-      drawConnectors(ctx, landmarks, FACEMESH_TESSELATION, {color: '#0f0', lineWidth: 0.5});
-    }
-    // Example: crude parameter extraction
     const lm = results.multiFaceLandmarks[0];
+    drawConnectors(ctx, lm, FACEMESH_TESSELATION, {color: '#0f0', lineWidth: 0.5});
+
+    // Example parameter extraction
     const nose = lm[1];
-    const leftEye = lm[159];
-    const rightEye = lm[386];
     const mouthTop = lm[13];
     const mouthBottom = lm[14];
+    const leftEyeTop = lm[159];
+    const leftEyeBottom = lm[145];
+    const rightEyeTop = lm[386];
+    const rightEyeBottom = lm[374];
 
-    const X = Math.round((nose.x - 0.5) * -200 + 50); // center ~50
-    const Y = Math.round((nose.y - 0.5) * -200 + 50);
-    const Z = Math.round((nose.z) * -500 + 50);
-    const Yaw = Math.round((nose.x - 0.5) * 100 + 50);
-    const Pitch = Math.round((nose.y - 0.5) * 100 + 50);
+    const X = Math.round((0.5 - nose.x) * 100 + 50);
+    const Y = Math.round((0.5 - nose.y) * 100 + 50);
+    const Z = Math.round((0 - nose.z) * 300 + 50);
+    const Yaw = Math.round((0.5 - nose.x) * 100 + 50);
+    const Pitch = Math.round((0.5 - nose.y) * 100 + 50);
     const Mouth = Math.round(Math.abs(mouthBottom.y - mouthTop.y) * 500);
-    const LeftEye = Math.round(Math.abs(lm[145].y - lm[159].y) * 500);
-    const RightEye = Math.round(Math.abs(lm[374].y - lm[386].y) * 500);
+    const LeftEye = Math.round(Math.abs(leftEyeBottom.y - leftEyeTop.y) * 500);
+    const RightEye = Math.round(Math.abs(rightEyeBottom.y - rightEyeTop.y) * 500);
     const Roll = 0; // placeholder
     const Smile = 0; // placeholder
     const Visible = 1;
@@ -135,23 +139,27 @@ function onResults(results) {
   ctx.restore();
 }
 
-const faceMesh = new FaceMesh({locateFile: file => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`});
-faceMesh.setOptions({
-  maxNumFaces: 1,
-  refineLandmarks: true,
-  minDetectionConfidence: 0.5,
-  minTrackingConfidence: 0.5
-});
-faceMesh.onResults(onResults);
+document.getElementById('connectBtn').addEventListener('click', async () => {
+  await connectBLE();
 
-const camera = new Camera(videoEl, {
-  onFrame: async () => {
-    await faceMesh.send({image: videoEl});
-  },
-  width: 640,
-  height: 480
+  const faceMesh = new FaceMesh({locateFile: file => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`});
+  faceMesh.setOptions({
+    maxNumFaces: 1,
+    refineLandmarks: true,
+    minDetectionConfidence: 0.5,
+    minTrackingConfidence: 0.5
+  });
+  faceMesh.onResults(onResults);
+
+  const camera = new Camera(videoEl, {
+    onFrame: async () => {
+      await faceMesh.send({image: videoEl});
+    },
+    width: 640,
+    height: 480
+  });
+  camera.start();
 });
-camera.start();
 </script>
 </body>
 </html>
