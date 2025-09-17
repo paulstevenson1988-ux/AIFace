@@ -1,18 +1,165 @@
 <!doctype html>
-<html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Face Tracking → ESP32 BLE</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  body { font-family: sans-serif; margin: 0; background: #111; color: #eee; }
+  #output { position: absolute; top: 0; left: 0; }
+  #log { white-space: pre-wrap; background: #222; padding: 8px; height: 150px; overflow: auto; }
+  button { margin: 8px; padding: 8px 12px; font-size: 16px; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
+</head>
 <body>
-<button id="connectBtn">Connect BLE</button>
+
+<video id="input_video" style="display:none;"></video>
+<canvas id="output" width="640" height="480"></canvas>
+<div>
+  <button id="connectBtn">Connect & Start Tracking</button>
+</div>
+<div id="log"></div>
+
 <script>
-document.getElementById('connectBtn').addEventListener('click', async () => {
-  console.log('Button clicked');
+const NUS_SERVICE_UUID = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+const NUS_RX_UUID      = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';
+const NUS_TX_UUID      = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';
+
+let rxChar, txChar, connected = false;
+
+function log(msg) {
+  const logEl = document.getElementById('log');
+  logEl.textContent += msg + '\n';
+  logEl.scrollTop = logEl.scrollHeight;
+  console.log(msg);
+}
+
+function zeroPad(num, len) {
+  return String(Math.max(0, Math.min(num, (10**len)-1))).padStart(len, '0');
+}
+
+async function connectBLE() {
   try {
-    const device = await navigator.bluetooth.requestDevice({
-      acceptAllDevices: true
+    let device;
+    try {
+      device = await navigator.bluetooth.requestDevice({
+        filters: [{ services: [NUS_SERVICE_UUID] }],
+        optionalServices: [NUS_SERVICE_UUID]
+      });
+    } catch {
+      log('UUID filter found nothing, falling back to acceptAllDevices...');
+      device = await navigator.bluetooth.requestDevice({
+        acceptAllDevices: true,
+        optionalServices: [NUS_SERVICE_UUID]
+      });
+    }
+
+    const server = await device.gatt.connect();
+    const service = await server.getPrimaryService(NUS_SERVICE_UUID);
+
+    txChar = await service.getCharacteristic(NUS_TX_UUID);
+    await txChar.startNotifications();
+    txChar.addEventListener('characteristicvaluechanged', e => {
+      const value = new TextDecoder().decode(e.target.value);
+      log('TX notify: ' + value);
     });
-    console.log('Selected device:', device.name || device.id);
+
+    rxChar = await service.getCharacteristic(NUS_RX_UUID);
+    connected = true;
+    log('Connected to ' + device.name);
   } catch (err) {
-    console.error('Error:', err);
+    log('BLE error: ' + err);
   }
+}
+
+async function sendFrame(params) {
+  if (!connected || !rxChar) return;
+  const frame =
+    zeroPad(params.X, 2) +
+    zeroPad(params.Y, 2) +
+    zeroPad(params.Z, 2) +
+    zeroPad(params.Yaw, 2) +
+    zeroPad(params.Pitch, 2) +
+    zeroPad(params.Mouth, 2) +
+    zeroPad(params.LeftEye, 2) +
+    zeroPad(params.RightEye, 2) +
+    String(params.Roll) +
+    String(params.Smile) +
+    String(params.Visible);
+  if (frame.length === 19) {
+    try {
+      await rxChar.writeValueWithoutResponse(new TextEncoder().encode(frame));
+      log('Sent: ' + frame);
+    } catch (e) {
+      log('Send error: ' + e);
+    }
+  }
+}
+
+// MediaPipe setup
+const videoEl = document.getElementById('input_video');
+const canvasEl = document.getElementById('output');
+const ctx = canvasEl.getContext('2d');
+
+function onResults(results) {
+  ctx.save();
+  ctx.clearRect(0, 0, canvasEl.width, canvasEl.height);
+  ctx.drawImage(results.image, 0, 0, canvasEl.width, canvasEl.height);
+
+  if (results.multiFaceLandmarks && results.multiFaceLandmarks.length > 0) {
+    const lm = results.multiFaceLandmarks[0];
+    drawConnectors(ctx, lm, FACEMESH_TESSELATION, {color: '#0f0', lineWidth: 0.5});
+
+    // Example parameter extraction
+    const nose = lm[1];
+    const mouthTop = lm[13];
+    const mouthBottom = lm[14];
+    const leftEyeTop = lm[159];
+    const leftEyeBottom = lm[145];
+    const rightEyeTop = lm[386];
+    const rightEyeBottom = lm[374];
+
+    const X = Math.round((0.5 - nose.x) * 100 + 50);
+    const Y = Math.round((0.5 - nose.y) * 100 + 50);
+    const Z = Math.round((0 - nose.z) * 300 + 50);
+    const Yaw = Math.round((0.5 - nose.x) * 100 + 50);
+    const Pitch = Math.round((0.5 - nose.y) * 100 + 50);
+    const Mouth = Math.round(Math.abs(mouthBottom.y - mouthTop.y) * 500);
+    const LeftEye = Math.round(Math.abs(leftEyeBottom.y - leftEyeTop.y) * 500);
+    const RightEye = Math.round(Math.abs(rightEyeBottom.y - rightEyeTop.y) * 500);
+    const Roll = 0; // placeholder
+    const Smile = 0; // placeholder
+    const Visible = 1;
+
+    sendFrame({X, Y, Z, Yaw, Pitch, Mouth, LeftEye, RightEye, Roll, Smile, Visible});
+  }
+  ctx.restore();
+}
+
+document.getElementById('connectBtn').addEventListener('click', async () => {
+  log('Connect button clicked');
+  await connectBLE();
+
+  const faceMesh = new FaceMesh({locateFile: file => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`});
+  faceMesh.setOptions({
+    maxNumFaces: 1,
+    refineLandmarks: true,
+    minDetectionConfidence: 0.5,
+    minTrackingConfidence: 0.5
+  });
+  faceMesh.onResults(onResults);
+
+  const camera = new Camera(videoEl, {
+    onFrame: async () => {
+      await faceMesh.send({image: videoEl});
+    },
+    width: 640,
+    height: 480
+  });
+  camera.start();
 });
 </script>
 </body>
