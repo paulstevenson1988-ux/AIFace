@@ -123,10 +123,7 @@ function startFaceTracking() {
   camera.start();
 }
 
-document.getElementById('connectBtn').addEventListener('click', async () => {
-  log('Connect button clicked');
-
-  // 1️⃣ Prompt immediately inside click
+async function startBLE() {
   let device;
   try {
     device = await navigator.bluetooth.requestDevice({
@@ -141,7 +138,6 @@ document.getElementById('connectBtn').addEventListener('click', async () => {
     });
   }
 
-  // 2️⃣ Connect BLE
   log('Connecting to GATT server...');
   const server = await device.gatt.connect();
   const service = await server.getPrimaryService(NUS_SERVICE_UUID);
@@ -160,8 +156,13 @@ document.getElementById('connectBtn').addEventListener('click', async () => {
   connected = true;
   log('Connected to ' + device.name);
 
-  // 3️⃣ Start face tracking AFTER connection
+  // Now start face tracking
   startFaceTracking();
+}
+
+document.getElementById('connectBtn').addEventListener('click', () => {
+  // Call BLE immediately on click
+  startBLE();
 });
 </script>
 </body>
